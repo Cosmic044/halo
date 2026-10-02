@@ -1,0 +1,9 @@
+{
+  "name": "halo",
+  "version": "0.3.0",
+  "description": "A living banner above the Claude Code prompt: usage rings, a burning cache fuse, session spend, Compact, and Claude on stage. Violet or matte black.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "cosmic044"
+  }
+}
