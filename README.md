@@ -12,10 +12,10 @@ A living banner above the Claude Code prompt in the Claude Desktop app. It shows
 - **Cache.** How much of the last request came from the prompt cache, and a fuse that burns down until the cache goes cold. Near the end it turns amber, then red. When it lapses the banner frosts over and it snows, and it tells you how many tokens your next message will re-cache.
 - **Spent.** What this session has cost, what the last turn cost, and a small bar for each recent turn.
 - **Claude.** Breathes, blinks and waves while idle, plays guitar while a turn runs, jumps and points at Compact when the cache is about to lapse, and falls asleep in the snow when it does.
-- **Compact.** Always in the banner's right end (press `c` when the banner has focus). It turns into an orange "Compact now" when compacting pays off.
+- **Compact.** Always at the banner's right end. Click it, or press **Ctrl+X then Tab** to put focus on the banner and press `c`. It says "Compacting…" while it runs and tells you how it went, and turns into an orange "Compact now" when compacting pays off. Typing `/compact` always works too.
 - **Next steps.** After each answer, three suggested follow-ups appear under the banner. Press 1 to 3 to fill the prompt, 0 to dismiss. This makes one small Haiku call per answer; `/halo next off` turns it off.
 
-Everything between events animates inside the SVG itself, so the banner costs no tokens and needs no redraw timers.
+Everything between events animates inside the SVG itself (the cache countdown, the 5-hour reset, the colour shifts, the moods, a dither swoop every few seconds), so the banner costs no tokens and only redraws when a number changes.
 
 ## Install
 
@@ -59,9 +59,11 @@ Paste this into a local Claude Code session:
 - `/halo debug` shows which screens are attached and how often the banner drew
 - `/halo lite` swaps the graphic for one line of text, to tell a drawing problem from a loading one
 
-## The Fable ring
+## Live usage and the Fable ring
 
-Claude Code only tells plugins about the 5-hour and weekly limits. Halo reads the Fable weekly limit from `~/.cosmic-pulse/claude/usage-cache.json`, which the Cosmic Pulse status line keeps up to date. Without that file the outer ring shows as a dotted outline and everything else works as normal.
+Claude Code only tells plugins about the 5-hour and weekly limits, and only as of the session's last reply, so on their own the rings stand still between your messages while other sessions use the same limits.
+
+If you run the Cosmic Pulse status line, Halo reads `~/.cosmic-pulse/claude/usage-cache.json` every 30 seconds. Cosmic Pulse asks the usage server about every two minutes, so Halo shows the same numbers as the app's usage popup, including the Fable weekly limit. Without that file Halo uses Claude Code's numbers, and the outer Fable ring shows as a dotted outline. Everything else works as normal.
 
 ## If it doesn't show
 

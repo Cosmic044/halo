@@ -9,7 +9,7 @@ import type {
 } from 'claude-code'
 
 import type { HaloCache, HaloMeter, HaloNext, HaloPrefs, HaloTtl, HaloWindow } from '../types'
-import { BIG, H, describe, hud, ringsOf } from './svg'
+import { BIG, H, describe, dockColor, hud, ringsOf } from './svg'
 import type { Rings } from './svg'
 
 const MIN = 60_000
@@ -41,28 +41,62 @@ const prefsA = atom({ plugin: 'halo', key: 'prefs' } as const, {
 const tickA = atom({ plugin: 'halo', key: 'tick' } as const, 0)
 const coldSoonA = atom({ plugin: 'halo', key: 'isColdSoon' } as const, false)
 const partyA = atom({ plugin: 'halo', key: 'partyAt' } as const, 0)
+const compactingA = atom({ plugin: 'halo', key: 'isCompacting' } as const, false)
 
-// Claude Code hands a plugin only the 5-hour and 7-day windows. The Fable week
-// comes from Cosmic Pulse, whose status line caches the usage endpoint at
-// ~/.cosmic-pulse/claude/usage-cache.json; without it the outer ring is dotted.
-let fableWindow: HaloWindow | null = null
+// Claude Code hands a plugin only the 5-hour and 7-day windows, as of this
+// session's last reply, so they stand still between messages while other
+// sessions spend the same limits. Cosmic Pulse's status line asks the usage
+// server itself about every two minutes and caches the answer, Fable week
+// included, at ~/.cosmic-pulse/claude/usage-cache.json. Halo polls that file and
+// draws the server's numbers while they are fresh; without it, the engine's
+// numbers and a dotted outer ring.
+type Pulse = { five: HaloWindow | null; seven: HaloWindow | null; fable: HaloWindow | null; at: number }
+const PULSE_FRESH = 10 * MIN
+let pulse: Pulse | null = null
+// The engine's own meter, kept so a poll can merge the file over it.
+let engineMeter: HaloMeter | null = null
 
-async function readFable($: EngineInterface) {
+async function readPulse($: EngineInterface) {
   const home = $.plugin.root.split(/[\\/]\.claude[\\/]/)[0]
   if (!home || home === $.plugin.root) return
   try {
-    const cache: unknown = JSON.parse(await $.fs.read(`${home}/.cosmic-pulse/claude/usage-cache.json`))
-    const list = (cache as { windows?: unknown }).windows
-    const w = Array.isArray(list)
-      ? (list as { id?: unknown; usedPercent?: unknown; resetsAt?: unknown }[]).find(x => x.id === 'seven_day_fable')
-      : undefined
-    fableWindow =
-      w && typeof w.usedPercent === 'number'
+    const cache = JSON.parse(await $.fs.read(`${home}/.cosmic-pulse/claude/usage-cache.json`)) as {
+      windows?: unknown
+      fetchedAt?: unknown
+    }
+    const list = Array.isArray(cache.windows)
+      ? (cache.windows as { id?: unknown; usedPercent?: unknown; resetsAt?: unknown }[])
+      : []
+    const of = (id: string): HaloWindow | null => {
+      const w = list.find(x => x.id === id)
+      return w && typeof w.usedPercent === 'number'
         ? { pct: w.usedPercent, resetsAt: typeof w.resetsAt === 'number' ? w.resetsAt * 1000 : null }
         : null
+    }
+    pulse = {
+      five: of('five_hour'),
+      seven: of('seven_day'),
+      fable: of('seven_day_fable'),
+      at: typeof cache.fetchedAt === 'number' ? cache.fetchedAt : 0,
+    }
   } catch {
-    fableWindow = null
+    pulse = null
   }
+}
+
+/** Draws `m` with the usage server's windows over it while Cosmic Pulse's fetch is fresh; redraws only on a change. */
+async function showMeter($: EngineInterface, m: HaloMeter) {
+  engineMeter = m
+  await readPulse($)
+  const now = await $.clock.now()
+  const p = pulse && now - pulse.at < PULSE_FRESH ? pulse : null
+  const shown: HaloMeter = {
+    ...m,
+    five: p?.five ?? m.five,
+    seven: p?.seven ?? m.seven,
+    fable: m.fable ?? p?.fable ?? pulse?.fable ?? null,
+  }
+  if (JSON.stringify(shown) !== JSON.stringify(await read($, meterA))) await update($, meterA, () => shown)
 }
 
 const windowOf = (limits: readonly SessionRateLimit[], kind: string): HaloWindow | null => {
@@ -79,7 +113,7 @@ const meterOf = (u: {
 }): HaloMeter => ({
   five: windowOf(u.rateLimits, 'five_hour'),
   seven: windowOf(u.rateLimits, 'seven_day'),
-  fable: windowOf(u.rateLimits, 'seven_day_fable') ?? fableWindow,
+  fable: windowOf(u.rateLimits, 'seven_day_fable'),
   ctxPct: u.context.percent ?? null,
   ctxTokens: u.context.tokens ?? null,
   window: u.context.window,
@@ -133,6 +167,7 @@ const diag = {
   attached: [] as string[],
   renders: {} as Record<string, { count: number; lastAt: number; svgChars: number }>,
   errors: [] as string[],
+  compacts: [] as string[],
 }
 let isLite = false
 
@@ -150,9 +185,8 @@ async function savePrefs($: EngineInterface, fn: (p: HaloPrefs) => HaloPrefs) {
 }
 
 async function refreshMeter($: EngineInterface) {
-  await readFable($)
   const u = await $.session.usage()
-  await update($, meterA, () => meterOf(u))
+  await showMeter($, meterOf(u))
   return u
 }
 
@@ -181,6 +215,53 @@ async function armTimers($: EngineInterface) {
   coldTimer = $.clock.after(Math.max(0, left + 500), () => {
     void update($, tickA, n => n + 1)
   })
+}
+
+// A press's dispatch ends, and aborts what it started, long before a
+// compaction finishes (clearing the chips alone redraws the band and ends it),
+// so Compact runs from a timer, outside the press, and says how it went.
+const startCompact = ($: EngineInterface) => {
+  $.clock.after(0, () => void runCompact($))
+}
+
+async function runCompact($: EngineInterface) {
+  const at = await $.clock.now()
+  const note = (s: string) => diag.compacts.push(`${new Date(at).toISOString()} ${s}`.slice(0, 300))
+  if (await read($, compactingA)) {
+    $.ui.toast('Already compacting…', { timeoutMs: 3000 })
+    return
+  }
+  await update($, compactingA, () => true)
+  note('requested')
+  // A compaction that never answers must not hold the button forever.
+  const watchdog = $.clock.after(5 * MIN, () => {
+    void (async () => {
+      if (!(await read($, compactingA))) return
+      note('no answer after 5 minutes')
+      await update($, compactingA, () => false)
+      $.ui.toast('Compact has not answered in 5 minutes. Try /compact.', { timeoutMs: 8000 })
+    })()
+  })
+  $.ui.toast('Compacting the conversation…', { timeoutMs: 6000 })
+  try {
+    const r = await $.session.compact({})
+    if (r.messages === undefined) {
+      note(`skipped: ${r.skip}`)
+      $.ui.toast(`Compact skipped: ${r.skip}`, { timeoutMs: 6000 })
+      return
+    }
+    await update($, nextA, () => [])
+    const k = (n: number) => `${Math.round(n / 1000)}k`
+    const sizes = r.tokensBefore && r.tokensAfter ? `: ${k(r.tokensBefore)} → ${k(r.tokensAfter)} tokens` : ''
+    note(`compacted${sizes}`)
+    $.ui.toast(`Compacted${sizes}.`, { timeoutMs: 5000 })
+  } catch (err) {
+    note(`failed: ${String(err)}`)
+    $.ui.toast(`Compact failed: ${String(err)}`.slice(0, 200), { timeoutMs: 8000 })
+  } finally {
+    watchdog.cancel()
+    await update($, compactingA, () => false)
+  }
 }
 
 async function suggest($: EngineInterface, answer: string, mine: number) {
@@ -219,6 +300,8 @@ export const register: Register = on => {
     // Re-sync the self-running SVG every five minutes (a hidden window may
     // pause its animation clock); a redraw costs no tokens.
     $.clock.every(5 * MIN, () => void update($, tickA, n => n + 1))
+    // Between messages, follow the usage server through Cosmic Pulse's cache.
+    $.clock.every(30_000, () => void (engineMeter && showMeter($, engineMeter)))
     return next(e)
   })
 
@@ -265,8 +348,7 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await readFable($)
-    await update($, meterA, () => meterOf(e))
+    await showMeter($, meterOf(e))
     return next(e)
   })
 
@@ -382,10 +464,7 @@ const drawBand = async (
     const summary = describe({ now, cache, meter, isWorking })
     const { Button } = $.ui.resolve(e)
 
-    const compact = async () => {
-      await update($, nextA, () => [])
-      await $.session.compact({})
-    }
+    const compact = () => startCompact($)
     const isCold = !isWorking && !cache.isLive && cache.lastAt > 0 && cache.lastAt + cache.ttlMs <= now
     const isFull = (meter.ctxPct ?? 0) >= 80
     // Compact is always at hand once there is a conversation; it only begs
@@ -435,28 +514,24 @@ const drawBand = async (
     // spans the band exactly. bodyColumns 8px cells run a little under the real
     // width (94 ≈ 750px, 93 ≈ 762px): the layout floor, its right side hung
     // from the right edge.
-    const stripW = Math.max(240, e.props.bodyColumns * 8 - 4)
-    // Compact lives in the banner's right end, laid over a slot the SVG leaves
-    // clear. It stays put through a turn, dim, so nothing ever shifts.
-    const room = isUrgent ? 132 : 100
-    const slot = isWorking ? (
-      <Button
-        key="compact"
-        hotkey="c"
-        plain
-        dimColor
-        label="Compact"
-        onPress={() => $.ui.toast('Compact once this turn finishes.', { timeoutMs: 3000 })}
-      />
+    // Compact lives in a dock at the banner's right end: a Box in the row
+    // beside it, filled with the colour the banner fades into, so the two read
+    // as one. (Laid over the banner in an absolute Box, the Button never got
+    // the press: the pointer on an absolute Box is its parent's.) It stays put
+    // through a turn and a compaction, dim, so nothing ever shifts.
+    const isCompacting = await read($, compactingA)
+    const stripW = Math.max(240, e.props.bodyColumns * 8 - 4 - (isUrgent ? 132 : 100))
+    const room = 20
+    const slot = isCompacting ? (
+      <Button key="compact" hotkey="c" plain dimColor label="Compacting…"
+        onPress={() => $.ui.toast('Already compacting…', { timeoutMs: 3000 })} />
+    ) : isWorking ? (
+      <Button key="compact" hotkey="c" plain dimColor label="Compact"
+        onPress={() => $.ui.toast('Compact once this turn finishes.', { timeoutMs: 3000 })} />
+    ) : isUrgent ? (
+      <Button key="compact" hotkey="c" variant="primary" label="Compact now" onPress={compact} />
     ) : (
-      <Button
-        key="compact"
-        hotkey="c"
-        plain={isUrgent ? undefined : true}
-        variant={isUrgent ? 'primary' : undefined}
-        label={isUrgent ? 'Compact now' : 'Compact'}
-        onPress={compact}
-      />
+      <Button key="compact" hotkey="c" plain label="Compact" onPress={compact} />
     )
     const rings = ringsOf(meter)
     const source = hud({
@@ -472,20 +547,28 @@ const drawBand = async (
       width: stripW,
       room,
       theme: prefs.theme ?? 'violet',
+      dock: true,
     })
     drawn = rings
     drawnBurn = burn.length
     ;(diag.renders[e.surface] ??= { count: 0, lastAt: 0, svgChars: 0 }).svgChars = source.length
 
-    // One banner across the band, Compact inside its right end; the chips get
-    // a row under it only while there are some. The Svg sits straight in a
-    // column Box with only its height given: in a row Box (a bare Box is one)
-    // the desktop frame falls back to 300 x 150.
+    // The banner takes the row up to Compact; the chips get a row under it only
+    // while there are some. The Svg sits straight in a column Box with only its
+    // height given: straight in a row Box the desktop frame falls back to 300 x 150.
     return (
       <Box flexDirection="column" rowGap={0}>
-        <Box key="banner" flexDirection="column" width="100%">
-          <Svg source={source} alt={summary || 'Halo: waiting for the first reply'} height={H} isInteractive />
-          <Box key="slot" position="absolute" top={0} bottom={0} right={1} flexDirection="row" alignItems="center">
+        <Box key="banner" flexDirection="row" alignItems="stretch" width="100%">
+          <Box key="strip" flexDirection="column" flexGrow={1}>
+            <Svg source={source} alt={summary || 'Halo: waiting for the first reply'} height={H} isInteractive />
+          </Box>
+          <Box
+            key="dock"
+            flexDirection="row"
+            alignItems="center"
+            paddingX={1}
+            backgroundColor={dockColor(prefs.theme, isCold)}
+          >
             {slot}
           </Box>
         </Box>

@@ -43,6 +43,8 @@ export type HudInput = {
   room?: number
   /** Which look: the violet banner (the default) or matte black. */
   theme?: HaloTheme
+  /** The host docks a control at the right end: square the right corners and fade into the dock's colour. */
+  dock?: boolean
 }
 
 export type CacheState = 'idle' | 'live' | 'warm' | 'cold'
@@ -86,6 +88,9 @@ type Palette = {
   tintL: string
   /** How hard the amber glow behind Compact burns when the cache is about to lapse. */
   heat: number
+  /** The dock's solid colour at the banner's right end, warm and frozen over. */
+  end: string
+  iceEnd: string
   /** A hairline round the banner and a soft light along its top (matte black only). */
   edge: string | null
   sheen: number
@@ -116,6 +121,8 @@ const THEMES: Record<HaloTheme, Palette> = {
     glint: 0.55,
     tintL: '#E9D5FF',
     heat: 0.55,
+    end: '#6D45EC',
+    iceEnd: '#4A69D2',
     edge: null,
     sheen: 0,
   },
@@ -146,6 +153,8 @@ const THEMES: Record<HaloTheme, Palette> = {
     glint: 0.42,
     tintL: '#FFFFFF',
     heat: 0.26,
+    end: '#0C0C0C',
+    iceEnd: '#0B1018',
     edge: 'rgba(255,255,255,.1)',
     sheen: 0.05,
   },
@@ -153,6 +162,15 @@ const THEMES: Record<HaloTheme, Palette> = {
 
 // The palette this draw uses: hud() sets it, as it sets SW.
 let T: Palette = THEMES.violet
+
+/** The dock's colour, for the host Box that holds Compact beside the banner. */
+export const dockColor = (theme: HaloTheme | undefined, isCold: boolean) => {
+  const p = THEMES[theme ?? 'violet']
+  return isCold ? p.iceEnd : p.end
+}
+
+/** How far the banner fades into the dock colour at its right end. */
+const FADE = 36
 
 // Fraction of the TTL left → colour, piecewise: teal, then amber, then rose.
 const STOPS: readonly [number, 'g' | 'a' | 'r'][] = [
@@ -472,20 +490,25 @@ const CELL = 6
 
 /**
  * The pixel wave: a band of lit cells that steps a cell at a time across the
- * strip, brightest at its leading edge, dithered with a checker overlay. One
- * stepped gradient mask does it, so it costs a few hundred bytes, not a rect
- * per column. `every` repeats it on a period.
+ * strip, brightest at its leading edge, dithered with a checker overlay. The
+ * band is its own small group, masked in its own coordinates and slid whole,
+ * so a step repaints its 72px, not the strip; it starts on a cell boundary, so
+ * its cells land on the grid's. `every` repeats it on a period.
  */
 let waveIds = 0
 type Tint = '' | 'a' | 'l'
 const TINT: Record<Tint, string> = { '': '#FFFFFF', a: '#FDE68A', l: '#E9D5FF' }
 const BAND = [0.62, 0.55, 0.46, 0.4, 0.33, 0.27, 0.21, 0.16, 0.12, 0.08, 0.05, 0.03]
+/** The most cells a second the band steps: one a frame at 60Hz, so none is dropped. */
+const WAVE_RATE = 60
 const pixelWave = (dir: 'ltr' | 'rtl', begin: number, every: number | null, tint: Tint = '') => {
-  const pass = 1.05
+  const span = BAND.length * CELL
+  const reach = Math.ceil(SW / CELL) * CELL
+  const steps = (reach + span) / CELL
+  // A wider strip takes longer to cross rather than stepping faster.
+  const pass = Math.max(1.05, steps / WAVE_RATE)
   if (every === null && begin + pass < 0) return ''
   const id = `w${waveIds++}`
-  const span = BAND.length * CELL
-  const steps = Math.ceil((SW + span) / CELL)
   // plateau k (left to right) of the band; the leading edge faces the travel
   const level = (k: number) => BAND[dir === 'ltr' ? BAND.length - 1 - k : k]!
   let stops = '<stop offset="0" stop-color="#fff" stop-opacity="0"/>'
@@ -495,18 +518,19 @@ const pixelWave = (dir: 'ltr' | 'rtl', begin: number, every: number | null, tint
   }
   stops += '<stop offset="1" stop-color="#fff" stop-opacity="0"/>'
   const xs: number[] = []
-  for (let j = 0; j <= steps; j++) xs.push(dir === 'ltr' ? -span + j * CELL : SW - j * CELL)
+  for (let j = 0; j <= steps; j++) xs.push(dir === 'ltr' ? -span + j * CELL : reach - j * CELL)
   const values = xs.map(x => `${x} 0`).join(';')
+  // A repeat never comes round before the pass it repeats has finished.
+  const period = every === null ? null : Math.max(every, pass + 0.5)
   const timing =
-    every === null
-      ? `dur="${pass}s" begin="${sec(begin)}" fill="freeze"`
-      : `keyTimes="${xs.map((_, j) => n2((j / steps) * (pass / every))).join(';')}" dur="${every}s" begin="${sec(begin)}" repeatCount="indefinite"`
-  const start = dir === 'ltr' ? -span : SW
+    period === null
+      ? `dur="${n2(pass)}s" begin="${sec(begin)}" fill="freeze"`
+      : `keyTimes="${xs.map((_, j) => (j / steps) * (pass / period)).map(t => t.toFixed(4)).join(';')}" dur="${n2(period)}s" begin="${sec(begin)}" repeatCount="indefinite"`
   return (
-    `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${span}" y2="0" gradientTransform="translate(${start} 0)">${stops}` +
-    `<animateTransform attributeName="gradientTransform" type="translate" values="${values}" calcMode="discrete" ${timing}/></linearGradient>` +
-    `<mask id="${id}m" maskUnits="userSpaceOnUse" x="0" y="0" width="${SW}" height="${H}"><rect width="${SW}" height="${H}" fill="url(#${id})"/></mask>` +
-    `<g mask="url(#${id}m)"><rect width="${SW}" height="${H}" fill="url(#px${tint})"/><rect width="${SW}" height="${H}" fill="url(#px2${tint})" opacity=".6"/></g>`
+    `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${span}" y2="0">${stops}</linearGradient>` +
+    `<mask id="${id}m" maskUnits="userSpaceOnUse" x="0" y="0" width="${span}" height="${H}"><rect width="${span}" height="${H}" fill="url(#${id})"/></mask>` +
+    `<g transform="translate(${xs[0]} 0)"><animateTransform attributeName="transform" type="translate" values="${values}" calcMode="discrete" ${timing}/>` +
+    `<g mask="url(#${id}m)"><rect width="${span}" height="${H}" fill="url(#px${tint})"/><rect width="${span}" height="${H}" fill="url(#px2${tint})" opacity=".6"/></g></g>`
   )
 }
 
@@ -600,6 +624,29 @@ const ring = (id: string, r: number, from: number, to: number, isHot: boolean) =
   return `${track}<circle cx="${DX}" cy="${DY}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${RW}" stroke-linecap="round" stroke-dasharray="${n2(c)} ${n2(c)}" stroke-dashoffset="${off}" transform="rotate(-90 ${DX} ${DY})" filter="url(#glow)">${sweep}${pulse}</circle>`
 }
 
+/**
+ * "↻4h11" counting down by itself: one label per minute for the next seven,
+ * past the 5-minute redraw, so it never stalls between draws.
+ */
+const ticker = (x: number, y: number, remMs: number) => {
+  const runs: [string, number][] = []
+  for (let t = 0; t <= 420; t += 5) {
+    const txt = `↻${fmtDur(remMs - t * 1000)}`
+    if (runs.at(-1)?.[0] !== txt) runs.push([txt, t])
+  }
+  return runs
+    .map(([txt, a], k) => {
+      const b = runs[k + 1]?.[1]
+      return (
+        `<text x="${x}" y="${y}" class="mut" font-size="7" font-weight="650" letter-spacing=".6"${k === 0 ? '' : ' opacity="0"'}>` +
+        (k === 0 ? '' : `<set attributeName="opacity" to="1" begin="${a}s"/>`) +
+        (b === undefined ? '' : `<set attributeName="opacity" to="0" begin="${b}s"/>`) +
+        `${esc(txt)}</text>`
+      )
+    })
+    .join('')
+}
+
 const sevColor = (pct: number) => (pct >= 90 ? '#FDA4AF' : pct >= 75 ? '#FDE68A' : '#FFFFFF')
 
 // ── the strip ────────────────────────────────────────────────────────────────
@@ -669,7 +716,7 @@ export const hud = (i: HudInput) => {
       ? ''
       : window_(
           `<rect width="100%" height="${H}" fill="url(#heat)"><animate attributeName="opacity" values=".25;1;.25" dur="1.1s" repeatCount="indefinite"/></rect>` +
-            `<rect width="100%" height="${H}" rx="${R}" fill="none" stroke="#FBBF24" stroke-width="3.2"><animate attributeName="stroke-opacity" values=".2;1;.2" dur="1.1s" repeatCount="indefinite"/></rect>` +
+            `<rect width="100%" height="${H}" rx="${i.dock ? 0 : R}" fill="none" stroke="#FBBF24" stroke-width="3.2"><animate attributeName="stroke-opacity" values=".2;1;.2" dur="1.1s" repeatCount="indefinite"/></rect>` +
             pixelWave('ltr', 0, 3.2, 'a') +
             sparkles(18, 7, SW - 140, SW),
           alarmAt,
@@ -709,8 +756,8 @@ export const hud = (i: HudInput) => {
   if (hasLimits || m.fable) {
     readout = cols
       .map(([label, color, w, from, x]) => {
-        const reset = label === '5H' && w?.resetsAt ? `<tspan class="mut" letter-spacing=".6"> ↻${fmtDur(w.resetsAt - now)}</tspan>` : ''
-        const cap = `<text x="${x}" y="15.5" class="cap" fill="${color}">${label}${reset}</text>`
+        const reset = label === '5H' && w?.resetsAt ? ticker(x + 15, 15.5, w.resetsAt - now) : ''
+        const cap = `<text x="${x}" y="15.5" class="cap" fill="${color}">${label}</text>${reset}`
         if (!w) return `${cap}<text x="${x}" y="33.5" class="mut" font-size="14.5" font-weight="720">—</text>`
         return cap + roll(from * 100, w.pct, x, 33.5, `fill="${sevColor(w.pct)}" font-size="14.5" font-weight="720" letter-spacing="-.2"`)
       })
@@ -911,12 +958,17 @@ export const hud = (i: HudInput) => {
     `<pattern id="grid" width="${CELL}" height="${CELL}" patternUnits="userSpaceOnUse"><rect x=".6" y=".6" width="${CELL - 1.2}" height="${CELL - 1.2}" fill="#fff" fill-opacity="${T.grid}"/></pattern>` +
     `<pattern id="chev" width="10" height="6" patternUnits="userSpaceOnUse"><path d="M2 .5 L6 3 L2 5.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/><animateTransform attributeName="patternTransform" type="translate" from="0 0" to="10 0" dur=".45s" repeatCount="indefinite"/></pattern>` +
     (st === 'warm' ? '' : `<linearGradient id="fz" x1="0" x2="1"><stop offset="0" stop-color="${T.fuse.g[0]}"/><stop offset="1" stop-color="${T.fuse.g[1]}"/></linearGradient>`) +
-    `<clipPath id="pill"><rect x="0" y="0" width="100%" height="${H}" rx="${R}"/></clipPath>` +
+    `<clipPath id="pill"><rect x="0" y="0" width="100%" height="${H}" rx="${i.dock ? 0 : R}"/></clipPath>` +
     `<clipPath id="cap"><rect x="${X}" y="${BY}" width="${BW}" height="6" rx="3"/></clipPath>` +
     `<filter id="blur" x="-50%" y="-80%" width="200%" height="260%"><feGaussianBlur stdDeviation="12"/></filter>` +
     `<filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur in="SourceGraphic" stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` +
     `<filter id="spark" x="-300%" y="-300%" width="700%" height="700%"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` +
     `<linearGradient id="top" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="${T.sheen}"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></linearGradient>` +
+    (i.dock
+      ? `<linearGradient id="endfade" x1="0" x2="1"><stop offset="0" stop-color="${T.end}" stop-opacity="0"/><stop offset="1" stop-color="${coldAt !== null && coldAt <= 0 ? T.iceEnd : T.end}">` +
+        (coldAt !== null && coldAt > 0 ? `<animate attributeName="stop-color" from="${T.end}" to="${T.iceEnd}" begin="${sec(coldAt)}" dur="2.5s" fill="freeze"/>` : '') +
+        `</stop></linearGradient>`
+      : '') +
     `</defs>` +
     `<g clip-path="url(#pill)" color="#fff">` +
     `<rect width="100%" height="${H}" fill="url(#bg)"/>${aurora}<rect width="100%" height="${H}" fill="url(#grid)"/>` +
@@ -928,7 +980,11 @@ export const hud = (i: HudInput) => {
     snowfall +
     (T.sheen ? `<rect width="100%" height="${H}" fill="url(#top)"/>` : '') +
     // A 2px stroke on the full rect, half outside the clip: a 1px hairline inside it.
-    (T.edge ? `<rect width="100%" height="${H}" rx="${R}" fill="none" stroke="${T.edge}" stroke-width="2"/>` : '') +
+    // Docked, banner and dock are one flat panel: square corners, and no rim
+    // that would stop dead where the dock begins.
+    (T.edge && !i.dock ? `<rect width="100%" height="${H}" rx="${R}" fill="none" stroke="${T.edge}" stroke-width="2"/>` : '') +
+    // Docked, the last FADE px melt into the dock's colour, rim and glow included.
+    (i.dock ? `<svg x="100%" y="0" width="1" height="${H}" overflow="visible"><rect x="${-FADE}" width="${FADE + 1}" height="${H}" fill="url(#endfade)"/></svg>` : '') +
     `</g>` +
     `<g transform="translate(${PAD} ${OY})">` +
     `<g class="seg"><title>${esc(tipA || 'Usage: waiting for the first reply')}</title><rect x="0" y="0" width="${150 + AX}" height="${CH}" fill="transparent"/>${orbit}${readout}</g>` +

@@ -48,6 +48,8 @@ declare module 'claude-code' {
       isColdSoon: boolean
       /** When the last turn finished or compaction landed (epoch ms): the party's start. */
       partyAt: number
+      /** A compaction Halo asked for is running. */
+      isCompacting: boolean
     }
   }
 }
