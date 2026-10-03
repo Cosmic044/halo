@@ -220,6 +220,8 @@ async function armTimers($: EngineInterface) {
 // A press's dispatch ends, and aborts what it started, long before a
 // compaction finishes (clearing the chips alone redraws the band and ends it),
 // so Compact runs from a timer, outside the press, and says how it went.
+// It runs /compact as if typed: $.session.compact is refused outright in a
+// desktop (SDK) session, where compaction runs inside a turn of its own.
 const startCompact = ($: EngineInterface) => {
   $.clock.after(0, () => void runCompact($))
 }
@@ -244,17 +246,13 @@ async function runCompact($: EngineInterface) {
   })
   $.ui.toast('Compacting the conversation…', { timeoutMs: 6000 })
   try {
-    const r = await $.session.compact({})
-    if (r.messages === undefined) {
-      note(`skipped: ${r.skip}`)
-      $.ui.toast(`Compact skipped: ${r.skip}`, { timeoutMs: 6000 })
-      return
-    }
+    // The session.compact hook frees the button and says how it went; this
+    // answer may never come back (a compaction can reload the module), and
+    // speaks only when no compaction ran (an error the command printed).
+    const r = await $.command.run({ command: 'compact' })
     await update($, nextA, () => [])
-    const k = (n: number) => `${Math.round(n / 1000)}k`
-    const sizes = r.tokensBefore && r.tokensAfter ? `: ${k(r.tokensBefore)} → ${k(r.tokensAfter)} tokens` : ''
-    note(`compacted${sizes}`)
-    $.ui.toast(`Compacted${sizes}.`, { timeoutMs: 5000 })
+    note(`ran /compact${r.text ? `: ${r.text}` : ''}`)
+    if (await read($, compactingA)) $.ui.toast(r.text ? r.text.slice(0, 160) : 'Compacted.', { timeoutMs: 5000 })
   } catch (err) {
     note(`failed: ${String(err)}`)
     $.ui.toast(`Compact failed: ${String(err)}`.slice(0, 200), { timeoutMs: 8000 })
@@ -295,6 +293,9 @@ export const register: Register = on => {
     }
     const ttlMs = await ttlFor($)
     await update($, cacheA, c => ({ ...c, ttlMs }))
+    // A fresh load has no compaction of its own running; a flag left by the
+    // last load (reloaded mid-compaction) would hold Compact on "Compacting…".
+    await update($, compactingA, () => false)
     const u = await refreshMeter($)
     usdMark = u.cost?.usd ?? null
     // Re-sync the self-running SVG every five minutes (a hidden window may
@@ -417,9 +418,20 @@ export const register: Register = on => {
     return done
   })
 
+  // A precompute installs nothing; only a compaction that ran resets the band.
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined) {
+    if (e.agentId === undefined && e.trigger !== 'precompute') {
+      // Whoever started it, a compaction that has run frees Compact.
+      if (await read($, compactingA)) {
+        await update($, compactingA, () => false)
+        const k = (n: number) => `${Math.round(n / 1000)}k`
+        const sizes = done.messages !== undefined && done.tokensBefore && done.tokensAfter ?`: ${k(done.tokensBefore)} → ${k(done.tokensAfter)} tokens` : ''
+        const at = await $.clock.now()
+        diag.compacts.push(`${new Date(at).toISOString()} ${done.skip ? `skipped: ${done.skip}` : `compacted${sizes}`}`.slice(0, 300))
+        $.ui.toast(done.skip ? `Compact skipped: ${done.skip}`.slice(0, 200) : `Compacted${sizes}.`, { timeoutMs: 5000 })
+      }
+      if (done.skip) return done
       warnTimer?.cancel()
       coldTimer?.cancel()
       await update($, coldSoonA, () => false)
@@ -533,6 +545,8 @@ const drawBand = async (
     ) : (
       <Button key="compact" hotkey="c" plain label="Compact" onPress={compact} />
     )
+    const panel = dockColor(prefs.theme, isCold)
+    const hasTray = chips.length > 0
     const rings = ringsOf(meter)
     const source = hud({
       now,
@@ -548,46 +562,49 @@ const drawBand = async (
       room,
       theme: prefs.theme ?? 'violet',
       dock: true,
+      tray: hasTray,
     })
     drawn = rings
     drawnBurn = burn.length
     ;(diag.renders[e.surface] ??= { count: 0, lastAt: 0, svgChars: 0 }).svgChars = source.length
 
-    // The banner takes the row up to Compact; the chips get a row under it only
-    // while there are some. The Svg sits straight in a column Box with only its
-    // height given: straight in a row Box the desktop frame falls back to 300 x 150.
+    // One panel in the dock's colour: the banner, and under it, only while there
+    // are some, the chips, with Compact's dock running down beside both. The
+    // banner melts its right end and (over chips) its bottom edge into that
+    // colour. The Svg sits straight in a column Box with only its height given:
+    // straight in a row Box the desktop frame falls back to 300 x 150.
     return (
-      <Box flexDirection="column" rowGap={0}>
-        <Box key="banner" flexDirection="row" alignItems="stretch" width="100%">
-          <Box key="strip" flexDirection="column" flexGrow={1}>
-            <Svg source={source} alt={summary || 'Halo: waiting for the first reply'} height={H} isInteractive />
-          </Box>
-          <Box
-            key="dock"
-            flexDirection="row"
-            alignItems="center"
-            paddingX={1}
-            backgroundColor={dockColor(prefs.theme, isCold)}
-          >
-            {slot}
-          </Box>
+      <Box key="banner" flexDirection="row" alignItems="stretch" width="100%" backgroundColor={panel}>
+        <Box key="strip" flexDirection="column" flexGrow={1} backgroundColor={panel}>
+          <Svg source={source} alt={summary || 'Halo: waiting for the first reply'} height={H} isInteractive />
+          {hasTray && (
+            <Box
+              key="chips"
+              flexDirection="row"
+              alignItems="center"
+              columnGap={1}
+              flexWrap="wrap"
+              paddingX={1}
+              backgroundColor={panel}
+            >
+              {chips.map((c, k) => (
+                <Button key={`next-${k}`} hotkey={String(k + 1)} plain label={c.label} onPress={fill(c)} />
+              ))}
+              <Button
+                key="next-dismiss"
+                hotkey="0"
+                plain
+                dimColor
+                role="dismiss"
+                label="Dismiss"
+                onPress={() => update($, nextA, () => [])}
+              />
+            </Box>
+          )}
         </Box>
-        {chips.length > 0 && (
-          <Box key="chips" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
-            {chips.map((c, k) => (
-              <Button key={`next-${k}`} hotkey={String(k + 1)} plain label={c.label} onPress={fill(c)} />
-            ))}
-            <Button
-              key="next-dismiss"
-              hotkey="0"
-              plain
-              dimColor
-              role="dismiss"
-              label="Dismiss"
-              onPress={() => update($, nextA, () => [])}
-            />
-          </Box>
-        )}
+        <Box key="dock" flexDirection="row" alignItems="center" paddingX={1} backgroundColor={panel}>
+          {slot}
+        </Box>
       </Box>
     )
 }

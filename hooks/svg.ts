@@ -45,6 +45,8 @@ export type HudInput = {
   theme?: HaloTheme
   /** The host docks a control at the right end: square the right corners and fade into the dock's colour. */
   dock?: boolean
+  /** The host lays a tray in the dock's colour under the banner: melt the bottom edge into it too. */
+  tray?: boolean
 }
 
 export type CacheState = 'idle' | 'live' | 'warm' | 'cold'
@@ -171,6 +173,8 @@ export const dockColor = (theme: HaloTheme | undefined, isCold: boolean) => {
 
 /** How far the banner fades into the dock colour at its right end. */
 const FADE = 36
+/** How far its bottom fades into the tray under it, behind the readouts. */
+const TRAY_FADE = 12
 
 // Fraction of the TTL left → colour, piecewise: teal, then amber, then rose.
 const STOPS: readonly [number, 'g' | 'a' | 'r'][] = [
@@ -967,6 +971,9 @@ export const hud = (i: HudInput) => {
     (i.dock
       ? `<linearGradient id="endfade" x1="0" x2="1"><stop offset="0" stop-color="${T.end}" stop-opacity="0"/><stop offset="1" stop-color="${coldAt !== null && coldAt <= 0 ? T.iceEnd : T.end}">` +
         (coldAt !== null && coldAt > 0 ? `<animate attributeName="stop-color" from="${T.end}" to="${T.iceEnd}" begin="${sec(coldAt)}" dur="2.5s" fill="freeze"/>` : '') +
+        `</stop></linearGradient>` +
+        `<linearGradient id="endfadey" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${T.end}" stop-opacity="0"/><stop offset="1" stop-color="${coldAt !== null && coldAt <= 0 ? T.iceEnd : T.end}">` +
+        (coldAt !== null && coldAt > 0 ? `<animate attributeName="stop-color" from="${T.end}" to="${T.iceEnd}" begin="${sec(coldAt)}" dur="2.5s" fill="freeze"/>` : '') +
         `</stop></linearGradient>`
       : '') +
     `</defs>` +
@@ -983,6 +990,8 @@ export const hud = (i: HudInput) => {
     // Docked, banner and dock are one flat panel: square corners, and no rim
     // that would stop dead where the dock begins.
     (T.edge && !i.dock ? `<rect width="100%" height="${H}" rx="${R}" fill="none" stroke="${T.edge}" stroke-width="2"/>` : '') +
+    // Over a tray, the bottom TRAY_FADE px melt into it the same way.
+    (i.dock && i.tray ? `<rect y="${H - TRAY_FADE}" width="100%" height="${TRAY_FADE}" fill="url(#endfadey)"/>` : '') +
     // Docked, the last FADE px melt into the dock's colour, rim and glow included.
     (i.dock ? `<svg x="100%" y="0" width="1" height="${H}" overflow="visible"><rect x="${-FADE}" width="${FADE + 1}" height="${H}" fill="url(#endfade)"/></svg>` : '') +
     `</g>` +

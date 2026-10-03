@@ -13,7 +13,7 @@ A living banner above the Claude Code prompt in the Claude Desktop app. It shows
 - **Spent.** What this session has cost, what the last turn cost, and a small bar for each recent turn.
 - **Claude.** Breathes, blinks and waves while idle, plays guitar while a turn runs, jumps and points at Compact when the cache is about to lapse, and falls asleep in the snow when it does.
 - **Compact.** Always at the banner's right end. Click it, or press **Ctrl+X then Tab** to put focus on the banner and press `c`. It says "Compacting…" while it runs and tells you how it went, and turns into an orange "Compact now" when compacting pays off. Typing `/compact` always works too.
-- **Next steps.** After each answer, three suggested follow-ups appear under the banner. Press 1 to 3 to fill the prompt, 0 to dismiss. This makes one small Haiku call per answer; `/halo next off` turns it off.
+- **Next steps.** After each answer, three suggested follow-ups appear inside the banner, under the readouts. Press 1 to 3 to fill the prompt, 0 to dismiss. This makes one small Haiku call per answer; `/halo next off` turns it off.
 
 Everything between events animates inside the SVG itself (the cache countdown, the 5-hour reset, the colour shifts, the moods, a dither swoop every few seconds), so the banner costs no tokens and only redraws when a number changes.
 
